@@ -50,6 +50,22 @@ def init_db() -> tuple[bool, str]:
                 conn.execute(
                     "ALTER TABLE quiz_results ADD COLUMN chapter_reference TEXT NOT NULL DEFAULT ''"
                 )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS competency_assessments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trainee_name TEXT NOT NULL,
+                    total_score REAL NOT NULL,
+                    max_score REAL NOT NULL,
+                    percentage REAL NOT NULL,
+                    pass_status TEXT NOT NULL,
+                    stage_scores_json TEXT NOT NULL,
+                    ai_feedback TEXT NOT NULL DEFAULT '',
+                    ai_source TEXT NOT NULL DEFAULT 'template',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
         return True, ""
     except sqlite3.Error as exc:
         return False, str(exc)
@@ -111,6 +127,77 @@ def fetch_results() -> tuple[list[dict[str, Any]], str]:
                     chapter_reference,
                     created_at
                 FROM quiz_results
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows], ""
+    except sqlite3.Error as exc:
+        return [], str(exc)
+
+
+def save_competency_result(
+    trainee_name: str,
+    total_score: float,
+    max_score: float,
+    percentage: float,
+    pass_status: str,
+    stage_scores_json: str,
+    ai_feedback: str = "",
+    ai_source: str = "template",
+) -> tuple[bool, str]:
+    try:
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with _get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO competency_assessments (
+                    trainee_name,
+                    total_score,
+                    max_score,
+                    percentage,
+                    pass_status,
+                    stage_scores_json,
+                    ai_feedback,
+                    ai_source,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trainee_name,
+                    float(total_score),
+                    float(max_score),
+                    float(percentage),
+                    str(pass_status or "").strip(),
+                    str(stage_scores_json or "").strip(),
+                    str(ai_feedback or "").strip(),
+                    str(ai_source or "template").strip(),
+                    created_at,
+                ),
+            )
+        return True, ""
+    except sqlite3.Error as exc:
+        return False, str(exc)
+
+
+def fetch_competency_results() -> tuple[list[dict[str, Any]], str]:
+    try:
+        with _get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    trainee_name,
+                    total_score,
+                    max_score,
+                    percentage,
+                    pass_status,
+                    stage_scores_json,
+                    ai_feedback,
+                    ai_source,
+                    created_at
+                FROM competency_assessments
                 ORDER BY id DESC
                 """
             ).fetchall()

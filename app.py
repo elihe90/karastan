@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import random
+from typing import Any
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -16,7 +17,19 @@ from api_provider import (
     generate_image_with_openai_compatible_api,
     generate_with_openai_compatible_api,
 )
-from database import fetch_results, init_db, save_quiz_result
+from competency_engine import (
+    build_template_feedback,
+    evaluate_competency_assessment,
+    get_competency_stages,
+    get_rubric_levels,
+)
+from database import (
+    fetch_competency_results,
+    fetch_results,
+    init_db,
+    save_competency_result,
+    save_quiz_result,
+)
 from llm_provider import generate_with_ollama, list_installed_ollama_models
 from prompt_engine import (
     generate_image_prompt,
@@ -1000,6 +1013,7 @@ def render_home() -> None:
     with col2:
         featured_workspaces = [
             "تولید متن با AI",
+            "ارزیابی مهارتی شایستگی محور",
             "تولیدگر پرامپت",
             "بهبوددهنده پرامپت",
             "درس‌ها",
@@ -1931,6 +1945,271 @@ def render_video_prompt_studio() -> None:
         st.caption("برای کپی، از آیکون کپی در گوشه کادر استفاده کنید.")
 
 
+def render_competency_assessment_engine() -> None:
+    st.title("موتور ارزیابی عملی شایستگی محور")
+    render_surface_card(
+        "Competency-Based Assessment",
+        (
+            "این بخش برای ارزیابی عملی کارآموز بر اساس مراحل رسمی شایستگی طراحی شده است. "
+            "امتیازدهی مرحله ای، وزن دار و آموزشی است و در پایان، بازخورد هوشمند و داشبورد پیشرفت ارائه می شود."
+        ),
+    )
+
+    rubric_df = pd.DataFrame(get_rubric_levels())
+    run_tab, dashboard_tab = st.tabs(["اجرای ارزیابی", "داشبورد پیشرفت کارآموز"])
+
+    with run_tab:
+        st.markdown("### راهنمای Rubric")
+        st.dataframe(rubric_df, use_container_width=True, hide_index=True)
+
+        stages = get_competency_stages()
+        with st.form("competency_assessment_form"):
+            trainee_name = st.text_input("نام کارآموز")
+            evidence_text = st.text_area(
+                "شواهد عملکرد کارآموز (نمونه خروجی، توضیح تمرین، لینک مستندات داخلی و ...)",
+                height=110,
+                placeholder="خلاصه شواهد واقعی کارآموز را وارد کنید تا ارزیابی آموزشی دقیق تر شود.",
+            )
+            pass_threshold = st.slider(
+                "حد نصاب قبولی (درصد)",
+                min_value=50,
+                max_value=90,
+                value=70,
+                step=5,
+            )
+
+            stage_ratings: list[list[float]] = []
+            for idx, stage in enumerate(stages, start=1):
+                with st.expander(f"مرحله {idx}: {stage['title']}", expanded=(idx <= 2)):
+                    st.caption(f"حداکثر امتیاز مرحله: {stage['max_score']}")
+                    ratings_for_stage: list[float] = []
+                    for c_idx, (criterion, weight) in enumerate(
+                        zip(stage["criteria"], stage["weights"]),
+                        start=1,
+                    ):
+                        rating = st.slider(
+                            f"{criterion} (وزن {weight}٪)",
+                            min_value=0,
+                            max_value=5,
+                            value=3,
+                            step=1,
+                            key=f"competency_stage_{idx}_criterion_{c_idx}",
+                        )
+                        ratings_for_stage.append(float(rating))
+                    stage_ratings.append(ratings_for_stage)
+
+            submitted = st.form_submit_button("ثبت ارزیابی و محاسبه شایستگی")
+
+        if submitted:
+            if not trainee_name.strip():
+                st.warning("نام کارآموز را وارد کنید.")
+                return
+
+            result = evaluate_competency_assessment(
+                stage_ratings=stage_ratings,
+                pass_threshold=float(pass_threshold),
+            )
+            stage_rows = result["stages"]
+            fallback_feedback = build_template_feedback(result=result, evidence_text=evidence_text)
+            stage_summary_lines = [
+                f"- {item['title']}: {item['trainee_score']} از {item['max_score']} ({item['stage_percentage']}%)"
+                for item in stage_rows
+            ]
+            ai_prompt = (
+                "شما یک ارزیاب آموزشی شایستگی محور هستید.\n"
+                "بر اساس داده های زیر، یک تحلیل آموزشی فارسی تولید کن.\n"
+                "خروجی دقیقاً شامل این بخش ها باشد:\n"
+                "1) نقاط قوت\n"
+                "2) شکاف های مهارتی\n"
+                "3) برنامه تمرینی مرحله بعد\n"
+                "4) توصیه شخصی سازی شده برای مدرس\n\n"
+                f"نام کارآموز: {trainee_name.strip()}\n"
+                f"امتیاز نهایی: {result['total_score']} از {result['max_score']} ({result['percentage']}%)\n"
+                f"وضعیت: {result['pass_status']}\n"
+                "خلاصه مراحل:\n"
+                + "\n".join(stage_summary_lines)
+                + "\n\n"
+                + f"شواهد ارائه شده:\n{(evidence_text or '-').strip()}\n"
+                + "\nپاسخ باید آموزشی، کوتاه، عملی و قابل اجرا باشد."
+            )
+            ai_feedback, ai_error, ai_source = maybe_generate_with_configured_ai(
+                prompt=ai_prompt,
+                fallback_text=fallback_feedback,
+                ollama_model=get_selected_ollama_model(),
+            )
+
+            saved, save_error = save_competency_result(
+                trainee_name=trainee_name.strip(),
+                total_score=float(result["total_score"]),
+                max_score=float(result["max_score"]),
+                percentage=float(result["percentage"]),
+                pass_status=str(result["pass_status"]),
+                stage_scores_json=json.dumps(stage_rows, ensure_ascii=False),
+                ai_feedback=ai_feedback,
+                ai_source=ai_source,
+            )
+            if not saved:
+                st.error(f"خطا در ذخیره نتیجه ارزیابی مهارتی: {save_error}")
+                return
+
+            st.session_state["last_competency_assessment"] = {
+                "trainee_name": trainee_name.strip(),
+                "result": result,
+                "feedback": ai_feedback,
+                "ai_source": ai_source,
+                "ai_error": ai_error,
+            }
+
+        last_result = st.session_state.get("last_competency_assessment")
+        if last_result:
+            result = last_result["result"]
+            trainee_name = str(last_result.get("trainee_name", "-")).strip()
+            feedback = str(last_result.get("feedback", "")).strip()
+            ai_source = str(last_result.get("ai_source", "template")).strip()
+            ai_error = str(last_result.get("ai_error", "")).strip()
+
+            render_surface_card(
+                f"نتیجه ارزیابی: {trainee_name}",
+                (
+                    f"امتیاز نهایی: <b>{result['total_score']}</b> از <b>{result['max_score']}</b> "
+                    f"(<b>{result['percentage']}%</b>) | وضعیت: <b>{_escape(result['pass_status'])}</b>"
+                ),
+            )
+
+            metric_col1, metric_col2, metric_col3 = st.columns(3)
+            metric_col1.metric("امتیاز کل", f"{result['total_score']} / {result['max_score']}")
+            metric_col2.metric("درصد شایستگی", f"{result['percentage']}%")
+            metric_col3.metric("وضعیت", str(result["pass_status"]))
+
+            stage_df = pd.DataFrame(result["stages"])[
+                ["title", "max_score", "trainee_score", "stage_percentage"]
+            ].rename(
+                columns={
+                    "title": "مرحله",
+                    "max_score": "حداکثر امتیاز",
+                    "trainee_score": "امتیاز کارآموز",
+                    "stage_percentage": "درصد مرحله",
+                }
+            )
+            st.markdown("### امتیازدهی مرحله ای")
+            st.dataframe(stage_df, use_container_width=True, hide_index=True)
+
+            if ai_error:
+                st.info(f"{ai_error} (Fallback: تحلیل داخلی)")
+            render_surface_card("منبع تحلیل", _escape(format_ai_source(ai_source)))
+            render_prompt_shell("بازخورد آموزشی و ارزیابی AI", feedback)
+
+    with dashboard_tab:
+        rows, error = fetch_competency_results()
+        if error:
+            st.error(f"خطا در خواندن نتایج شایستگی: {error}")
+            return
+        if not rows:
+            st.info("هنوز هیچ ارزیابی مهارتی ثبت نشده است.")
+            return
+
+        df = pd.DataFrame(rows)
+        df["percentage"] = pd.to_numeric(df["percentage"], errors="coerce").fillna(0.0)
+        df["total_score"] = pd.to_numeric(df["total_score"], errors="coerce").fillna(0.0)
+        df["max_score"] = pd.to_numeric(df["max_score"], errors="coerce").fillna(0.0)
+
+        trainee_names = sorted(
+            [str(item).strip() for item in df["trainee_name"].dropna().unique() if str(item).strip()]
+        )
+        selected_trainee = st.selectbox("فیلتر کارآموز", ["همه کارآموزان"] + trainee_names)
+        filtered_df = (
+            df
+            if selected_trainee == "همه کارآموزان"
+            else df[df["trainee_name"].astype(str) == selected_trainee]
+        )
+
+        pass_rate = (
+            round((filtered_df["pass_status"].astype(str) == "قبول").mean() * 100.0, 2)
+            if len(filtered_df) > 0
+            else 0.0
+        )
+        avg_score = round(float(filtered_df["percentage"].mean()), 2) if len(filtered_df) > 0 else 0.0
+
+        d1, d2, d3 = st.columns(3)
+        d1.metric("تعداد ارزیابی", int(len(filtered_df)))
+        d2.metric("میانگین شایستگی", f"{avg_score}%")
+        d3.metric("نرخ قبولی", f"{pass_rate}%")
+
+        st.markdown("### روند پیشرفت")
+        trend_df = (
+            filtered_df[["created_at", "percentage"]]
+            .copy()
+            .sort_values("created_at")
+            .rename(columns={"created_at": "زمان", "percentage": "شایستگی"})
+        )
+        if len(trend_df) > 0:
+            st.line_chart(trend_df.set_index("زمان"))
+
+        stage_records: list[dict[str, Any]] = []
+        for _, row in filtered_df.iterrows():
+            raw_json = str(row.get("stage_scores_json", "")).strip()
+            if not raw_json:
+                continue
+            try:
+                stage_items = json.loads(raw_json)
+            except Exception:
+                continue
+            if not isinstance(stage_items, list):
+                continue
+            for stage in stage_items:
+                stage_records.append(
+                    {
+                        "مرحله": str(stage.get("title", "-")),
+                        "درصد مرحله": float(stage.get("stage_percentage", 0.0)),
+                    }
+                )
+
+        if stage_records:
+            stage_avg_df = (
+                pd.DataFrame(stage_records)
+                .groupby("مرحله", as_index=False)["درصد مرحله"]
+                .mean()
+                .sort_values("درصد مرحله", ascending=False)
+            )
+            st.markdown("### میانگین شایستگی هر مرحله")
+            st.dataframe(stage_avg_df, use_container_width=True, hide_index=True)
+
+        view_df = filtered_df[
+            [
+                "id",
+                "trainee_name",
+                "total_score",
+                "max_score",
+                "percentage",
+                "pass_status",
+                "ai_source",
+                "created_at",
+            ]
+        ].rename(
+            columns={
+                "id": "شناسه",
+                "trainee_name": "نام کارآموز",
+                "total_score": "امتیاز کل",
+                "max_score": "حداکثر امتیاز",
+                "percentage": "درصد",
+                "pass_status": "وضعیت",
+                "ai_source": "منبع تحلیل",
+                "created_at": "تاریخ/ساعت",
+            }
+        )
+        st.markdown("### ثبت های ارزیابی مهارتی")
+        st.dataframe(view_df, use_container_width=True, hide_index=True)
+
+        csv_data = view_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            "خروجی CSV ارزیابی مهارتی",
+            data=csv_data,
+            file_name="karistan_competency_results.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
 def render_quiz() -> None:
     st.title("آزمون آفلاین")
     render_surface_card(
@@ -2190,6 +2469,7 @@ def main() -> None:
         "خانه": render_home,
         "نقشه کتاب مرجع": render_book_map,
         "درس‌ها": render_lessons,
+        "ارزیابی مهارتی شایستگی محور": render_competency_assessment_engine,
         "بهبوددهنده پرامپت": render_prompt_improver,
         "تولید متن با AI": lambda: render_ai_text_generator_workspace(force_api=True),
         "استدیو پرامپت متنی": render_text_prompt_studio,
