@@ -202,10 +202,12 @@ d
   - `pandas`
 - برای حالت اختیاری مدل لوکال:
   - `ollama` (پکیج پایتون)
-  - برنامه Ollama در حال اجرا روی سیستم
-# برای راه‌اندازی:
+ برنامه Ollama در حال اجرا روی سیستم
+
+#براه‌اندازی:
 
 ```bash
+
 
 pip install -r requirements.txt
 streamlit run app.py
