@@ -64,18 +64,17 @@ streamlit run app.py
 لیست مدل‌ها به‌صورت خودکار از `ollama list` خوانده می‌شود.
 مدل پیشنهادی برای MVP به‌صورت پیش‌فرض: `qwen2.5:3b`
 
-## استفاده اختیاری از API (AvalAI / OpenAI-Compatible)
+## استفاده اختیاری از API (gapgpt / OpenAI-Compatible)
 
 اگر می‌خواهید به‌جای مدل لوکال، از رابط API استفاده کنید:
 
-1. یک کلید API از AvalAI دریافت کنید.
-2. در سایدبار گزینه `استفاده از API (AvalAI / OpenAI-Compatible)` را فعال کنید.
+1. یک کلید API از gapgpt دریافت کنید.
+2. در سایدبار گزینه `استفاده از API (gapgpt / OpenAI-Compatible)` را فعال کنید.
 3. مقادیر زیر را وارد کنید:
-   - `Base URL` (مثال رایج: `https://api.avalai.ir/v1`)
+   - `Base URL` (مثال رایج: `https://api.gapgpt.app/v1`)
    - `مدل API` (مثال: `gpt-4o-mini`)
    - `API Key`
 
-نکته: اگر در پنل AvalAI مسیر `/openai` دارید، همان مسیر را در Base URL تنظیم کنید.
 
 ## ساختار پروژه
 
