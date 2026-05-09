@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 import html
 import json
 import os
@@ -18,7 +19,9 @@ from api_provider import (
     generate_with_openai_compatible_api,
 )
 from competency_engine import (
+    analyze_prompt_offline,
     build_template_feedback,
+    classify_skill_level,
     evaluate_competency_assessment,
     get_competency_stages,
     get_rubric_levels,
@@ -563,6 +566,91 @@ button[data-baseweb="tab"][aria-selected="true"] {
     margin-bottom: 0.55rem;
 }
 
+.assessment-status-wrap {
+    border: 1px solid rgba(152, 204, 255, 0.5);
+    border-radius: 16px;
+    background: linear-gradient(160deg, rgba(34, 57, 99, 0.9), rgba(22, 40, 74, 0.92));
+    padding: 0.75rem 0.85rem;
+    margin-bottom: 0.8rem;
+}
+
+.assessment-status-head {
+    color: #dcecff;
+    font-size: 0.82rem;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.35rem;
+}
+
+.assessment-status-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.45rem;
+}
+
+.assessment-status-item {
+    border: 1px solid rgba(165, 206, 255, 0.38);
+    border-radius: 12px;
+    background: rgba(16, 30, 58, 0.62);
+    padding: 0.42rem 0.55rem;
+}
+
+.assessment-status-label {
+    color: #a9c4ea;
+    font-size: 0.74rem;
+}
+
+.assessment-status-value {
+    color: #f2f7ff;
+    font-size: 0.9rem;
+    font-weight: 700;
+    margin-top: 0.08rem;
+}
+
+.assessment-panel {
+    border: 1px solid rgba(160, 201, 255, 0.44);
+    border-radius: 16px;
+    background: linear-gradient(165deg, rgba(35, 58, 101, 0.86), rgba(24, 42, 76, 0.9));
+    padding: 0.78rem 0.85rem;
+    margin-bottom: 0.75rem;
+    min-height: 120px;
+}
+
+.assessment-panel-title {
+    color: #f1f7ff;
+    font-weight: 800;
+    font-size: 0.96rem;
+    margin-bottom: 0.34rem;
+}
+
+.assessment-panel-desc {
+    color: #d2e2f8;
+    font-size: 0.87rem;
+    line-height: 1.9;
+}
+
+.assessment-final-card {
+    border: 1px solid rgba(129, 198, 255, 0.5);
+    border-radius: 18px;
+    background:
+        radial-gradient(460px 220px at 88% 18%, rgba(110, 187, 255, 0.18), transparent 58%),
+        linear-gradient(150deg, rgba(19, 37, 70, 0.95), rgba(14, 27, 50, 0.96));
+    padding: 0.92rem 1rem;
+    margin-top: 0.65rem;
+}
+
+.assessment-final-title {
+    color: #f4f8ff;
+    font-size: 1.02rem;
+    font-weight: 800;
+    margin-bottom: 0.42rem;
+}
+
+.assessment-final-body {
+    color: #d6e5fa;
+    font-size: 0.9rem;
+    line-height: 1.95;
+}
+
 [data-testid="stRadio"] label p,
 [data-testid="stCheckbox"] label p {
     color: var(--text-secondary) !important;
@@ -613,6 +701,10 @@ button[data-baseweb="tab"][aria-selected="true"] {
     .hero-subtitle {
         font-size: 0.93rem;
         line-height: 1.75;
+    }
+
+    .assessment-status-grid {
+        grid-template-columns: 1fr 1fr;
     }
 }
 </style>
@@ -1945,159 +2037,374 @@ def render_video_prompt_studio() -> None:
         st.caption("برای کپی، از آیکون کپی در گوشه کادر استفاده کنید.")
 
 
-def render_competency_assessment_engine() -> None:
-    st.title("موتور ارزیابی عملی شایستگی محور")
-    render_surface_card(
-        "Competency-Based Assessment",
+def _get_stage_feedback(stage_percentage: float) -> str:
+    value = float(stage_percentage)
+    if value >= 85:
+        return "عملکرد پایدار و حرفه‌ای"
+    if value >= 70:
+        return "قابل قبول، با ظرفیت بهبود"
+    if value >= 55:
+        return "در حال رشد، نیازمند تمرین هدفمند"
+    return "نیازمند بازطراحی و تمرین مجدد"
+
+
+def _save_assessment_workspace(payload: dict[str, Any]) -> tuple[bool, str]:
+    save_path = DATA_DIR / "assessment_workspace_saves.jsonl"
+    try:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with save_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _contains_any_local(text: str, tokens: list[str]) -> bool:
+    lowered = str(text or "").lower()
+    return any(token.lower() in lowered for token in tokens)
+
+
+def _signal_score_local(analysis: dict[str, Any], key: str, fallback: float = 2.0) -> float:
+    value = analysis.get("field_scores", {}).get(key)
+    if value is None:
+        return float(fallback)
+    return max(0.0, min(5.0, float(value)))
+
+
+def _build_official_stage_ratings(stage_payloads: list[dict[str, str]]) -> tuple[list[list[float]], dict[str, Any]]:
+    all_text = "\n".join(
         (
-            "این بخش برای ارزیابی عملی کارآموز بر اساس مراحل رسمی شایستگی طراحی شده است. "
-            "امتیازدهی مرحله ای، وزن دار و آموزشی است و در پایان، بازخورد هوشمند و داشبورد پیشرفت ارائه می شود."
-        ),
+            f"{item.get('scenario', '')}\n{item.get('prompt', '')}\n{item.get('evidence', '')}"
+            for item in stage_payloads
+        )
+    )
+    global_analysis = analyze_prompt_offline(all_text)
+    ratings: list[list[float]] = []
+
+    for idx, payload in enumerate(stage_payloads, start=1):
+        stage_text = f"{payload.get('scenario', '')}\n{payload.get('prompt', '')}\n{payload.get('evidence', '')}"
+        stage_analysis = analyze_prompt_offline(stage_text)
+        low = stage_text.lower()
+        model_signal = 5.0 if _contains_any_local(low, ["claude", "gpt-4", "bert", "t5", "llm", "transformer"]) else 2.0
+        image_signal = 5.0 if _contains_any_local(low, ["image", "تصویر", "diffusion", "midjourney", "sdxl"]) else 2.0
+        video_signal = 5.0 if _contains_any_local(low, ["video", "ویدیو", "انیمیشن", "runway", "sora", "kling"]) else 2.0
+        audio_signal = 5.0 if _contains_any_local(low, ["audio", "voice", "tts", "speech", "صوت", "پادکست"]) else 2.0
+
+        if idx == 1:
+            row = [
+                model_signal,
+                _signal_score_local(stage_analysis, "ethical_awareness", 2.0),
+                max(_signal_score_local(stage_analysis, "goal", 2.0), _signal_score_local(stage_analysis, "context", 2.0)),
+            ]
+        elif idx == 2:
+            row = [
+                (_signal_score_local(stage_analysis, "role", 2.0) + _signal_score_local(stage_analysis, "goal", 2.0)) / 2.0,
+                max(_signal_score_local(stage_analysis, "examples", 2.0), _signal_score_local(stage_analysis, "output_format", 2.0)),
+                max(_signal_score_local(stage_analysis, "constraints", 2.0), _signal_score_local(stage_analysis, "step_by_step_logic", 2.0)),
+                max(_signal_score_local(stage_analysis, "audience", 2.0), _signal_score_local(stage_analysis, "tone", 2.0)),
+            ]
+        elif idx == 3:
+            row = [
+                _signal_score_local(stage_analysis, "step_by_step_logic", 2.0),
+                max(_signal_score_local(stage_analysis, "examples", 2.0), _signal_score_local(stage_analysis, "constraints", 2.0)),
+            ]
+        elif idx == 4:
+            metric_signal = 5.0 if _contains_any_local(low, ["metric", "kpi", "a/b", "precision", "recall", "feedback"]) else 2.0
+            iter_signal = 5.0 if _contains_any_local(low, ["iterate", "iteration", "revise", "بهبود", "بازنگری"]) else 2.0
+            row = [metric_signal, iter_signal]
+        elif idx == 5:
+            content_signal = 5.0 if _contains_any_local(low, ["مقاله", "داستان", "شعر", "کد", "بازاریابی", "article", "story", "poem", "marketing"]) else 2.0
+            optimize_signal = max(_signal_score_local(stage_analysis, "tone", 2.0), _signal_score_local(stage_analysis, "output_format", 2.0))
+            row = [max(model_signal, content_signal), optimize_signal]
+        elif idx == 6:
+            row = [
+                image_signal,
+                max(_signal_score_local(stage_analysis, "visual_style", 2.0), _signal_score_local(stage_analysis, "lighting", 2.0)),
+                max(_signal_score_local(stage_analysis, "negative_prompt", 2.0), _signal_score_local(stage_analysis, "constraints", 2.0)),
+            ]
+        elif idx == 7:
+            row = [
+                max(video_signal, _signal_score_local(stage_analysis, "camera", 2.0)),
+                max(_signal_score_local(stage_analysis, "step_by_step_logic", 2.0), _signal_score_local(stage_analysis, "lighting", 2.0)),
+            ]
+        elif idx == 8:
+            row = [
+                max(audio_signal, _signal_score_local(stage_analysis, "voice_tone", 2.0)),
+                max(_signal_score_local(stage_analysis, "pace", 2.0), _signal_score_local(stage_analysis, "emotion", 2.0)),
+            ]
+        else:
+            row = [
+                5.0 if _contains_any_local(low, ["مسئولیت", "مسئولیت پذیری", "responsibility"]) else 4.0,
+                max(_signal_score_local(stage_analysis, "ethical_awareness", 2.0), 4.0),
+                5.0 if _contains_any_local(low, ["زمان", "deadline", "time"]) else 4.0,
+                5.0 if _contains_any_local(low, ["ایمنی داده", "privacy", "امنیت", "safety"]) else 4.0,
+                5.0 if _contains_any_local(low, ["مستند", "documentation", "log", "گزارش"]) else 4.0,
+            ]
+        ratings.append([max(0.0, min(5.0, float(v))) for v in row])
+
+    return ratings, global_analysis
+
+
+def render_competency_assessment_engine() -> None:
+    st.title("لابراتوار ارزیابی عملی مهارت AI")
+    render_surface_card(
+        "Karistan Assessment Lab",
+        "محیط ارزیابی آفلاین برای تحلیل ساختاری پرامپت، امتیازدهی شایستگی و ثبت نتایج."
     )
 
-    rubric_df = pd.DataFrame(get_rubric_levels())
-    run_tab, dashboard_tab = st.tabs(["اجرای ارزیابی", "داشبورد پیشرفت کارآموز"])
+    if "assessment_lab_save_status" not in st.session_state:
+        st.session_state["assessment_lab_save_status"] = "ثبت نشده"
+    if "assessment_lab_ai_source" not in st.session_state:
+        st.session_state["assessment_lab_ai_source"] = "template"
+    if "assessment_lab_ai_error" not in st.session_state:
+        st.session_state["assessment_lab_ai_error"] = ""
+    if "assessment_lab_generated_output" not in st.session_state:
+        st.session_state["assessment_lab_generated_output"] = ""
+    if "assessment_lab_rewrite" not in st.session_state:
+        st.session_state["assessment_lab_rewrite"] = ""
+    if "assessment_lab_analysis" not in st.session_state:
+        st.session_state["assessment_lab_analysis"] = {}
+    if "assessment_lab_result" not in st.session_state:
+        st.session_state["assessment_lab_result"] = {}
+    if "assessment_lab_feedback" not in st.session_state:
+        st.session_state["assessment_lab_feedback"] = ""
 
-    with run_tab:
-        st.markdown("### راهنمای Rubric")
-        st.dataframe(rubric_df, use_container_width=True, hide_index=True)
+    lab_tab, dashboard_tab = st.tabs(["محیط ارزیابی عملی", "داشبورد پیشرفت کارآموز"])
 
-        stages = get_competency_stages()
-        with st.form("competency_assessment_form"):
-            trainee_name = st.text_input("نام کارآموز")
-            evidence_text = st.text_area(
-                "شواهد عملکرد کارآموز (نمونه خروجی، توضیح تمرین، لینک مستندات داخلی و ...)",
-                height=110,
-                placeholder="خلاصه شواهد واقعی کارآموز را وارد کنید تا ارزیابی آموزشی دقیق تر شود.",
-            )
-            pass_threshold = st.slider(
-                "حد نصاب قبولی (درصد)",
-                min_value=50,
-                max_value=90,
-                value=70,
-                step=5,
-            )
+    with lab_tab:
+        trainee_name = st.text_input("نام کارآموز", key="assessment_lab_trainee_name")
+        pass_threshold = st.slider(
+            "حد نصاب قبولی (درصد)",
+            min_value=50,
+            max_value=90,
+            value=70,
+            step=5,
+            key="assessment_lab_pass_threshold",
+        )
 
-            stage_ratings: list[list[float]] = []
-            for idx, stage in enumerate(stages, start=1):
-                with st.expander(f"مرحله {idx}: {stage['title']}", expanded=(idx <= 2)):
-                    st.caption(f"حداکثر امتیاز مرحله: {stage['max_score']}")
-                    ratings_for_stage: list[float] = []
-                    for c_idx, (criterion, weight) in enumerate(
-                        zip(stage["criteria"], stage["weights"]),
-                        start=1,
-                    ):
-                        rating = st.slider(
-                            f"{criterion} (وزن {weight}٪)",
-                            min_value=0,
-                            max_value=5,
-                            value=3,
-                            step=1,
-                            key=f"competency_stage_{idx}_criterion_{c_idx}",
-                        )
-                        ratings_for_stage.append(float(rating))
-                    stage_ratings.append(ratings_for_stage)
+        st.markdown("### مرحله ۱: پرامپت متنی")
+        text_scenario = st.text_area("سناریو متنی", key="assessment_text_scenario", height=90)
+        text_prompt = st.text_area("پرامپت متنی", key="assessment_text_prompt", height=180)
+        text_evidence = st.text_area("شواهد مرحله متنی (اختیاری)", key="assessment_text_evidence", height=90)
 
-            submitted = st.form_submit_button("ثبت ارزیابی و محاسبه شایستگی")
+        st.markdown("### مرحله ۲: پرامپت تصویر")
+        image_scenario = st.text_area("سناریو تصویر", key="assessment_image_scenario", height=90)
+        image_prompt = st.text_area("پرامپت تصویر", key="assessment_image_prompt", height=180)
+        image_evidence = st.text_area("شواهد مرحله تصویر (اختیاری)", key="assessment_image_evidence", height=90)
 
-        if submitted:
+        st.markdown("### مرحله ۳: پرامپت ویدئو")
+        video_scenario = st.text_area("سناریو ویدئو", key="assessment_video_scenario", height=90)
+        video_prompt = st.text_area("پرامپت ویدئو", key="assessment_video_prompt", height=180)
+        video_evidence = st.text_area("شواهد مرحله ویدئو (اختیاری)", key="assessment_video_evidence", height=90)
+
+        c1, c2, c3 = st.columns(3)
+        run_assessment = c1.button("ارزیابی آفلاین سه‌مرحله‌ای", use_container_width=True)
+        run_api_feedback = c2.button("بازخورد API (اختیاری و بدون امتیاز)", use_container_width=True)
+        run_save = c3.button("ذخیره نتیجه", use_container_width=True)
+        st.caption("API فقط برای تولید بازخورد متنی است و هیچ امتیاز مستقیمی به نمره آزمون اضافه نمی‌کند.")
+        st.caption("فیلدهای شواهد برای مستندسازی و کیفیت بازخورد هستند و بارم مستقیم ندارند.")
+
+        if run_assessment:
+            if not text_prompt.strip() or not image_prompt.strip() or not video_prompt.strip():
+                st.warning("برای هر سه مرحله، پرامپت را وارد کنید.")
+            else:
+                text_payload = {"scenario": text_scenario, "prompt": text_prompt, "evidence": text_evidence}
+                image_payload = {"scenario": image_scenario, "prompt": image_prompt, "evidence": image_evidence}
+                video_payload = {"scenario": video_scenario, "prompt": video_prompt, "evidence": video_evidence}
+                attitude_payload = {
+                    "scenario": "\n".join([text_scenario, image_scenario, video_scenario]),
+                    "prompt": "\n".join([text_prompt, image_prompt, video_prompt]),
+                    "evidence": "\n".join([text_evidence, image_evidence, video_evidence]),
+                }
+
+                # Map official rubric to 3 practical phases:
+                # text -> stages 1..5, image -> stage 6, video -> stages 7..8, attitude -> stage 9
+                stage_payloads = [
+                    text_payload,
+                    text_payload,
+                    text_payload,
+                    text_payload,
+                    text_payload,
+                    image_payload,
+                    video_payload,
+                    video_payload,
+                    attitude_payload,
+                ]
+                ratings, global_analysis = _build_official_stage_ratings(stage_payloads)
+                result = evaluate_competency_assessment(
+                    stage_ratings=ratings,
+                    pass_threshold=float(pass_threshold),
+                )
+                feedback_text = build_template_feedback(result=result, evidence_text=attitude_payload["evidence"])
+                st.session_state["assessment_lab_analysis"] = global_analysis
+                st.session_state["assessment_lab_result"] = result
+                st.session_state["assessment_lab_feedback"] = feedback_text
+                st.session_state["assessment_lab_ai_source"] = "template"
+                st.session_state["assessment_lab_ai_error"] = ""
+
+        if run_api_feedback:
+            result = st.session_state.get("assessment_lab_result", {})
+            fallback_feedback = str(st.session_state.get("assessment_lab_feedback", "")).strip()
+            if not result:
+                st.warning("ابتدا ارزیابی آفلاین را اجرا کنید.")
+            else:
+                stage_lines = [
+                    f"- {item.get('title', '-')}: {item.get('trainee_score', 0)} از {item.get('max_score', 0)}"
+                    for item in list(result.get("stages", []))
+                ]
+                prompt = (
+                    "بازخورد فارسی کوتاه در چهار بخش بده: نقاط قوت، نقاط ضعف، عناصر جاافتاده، پیشنهادهای بهبود.\n\n"
+                    + "\n".join(stage_lines)
+                )
+                enriched_feedback, ai_error, ai_source = maybe_generate_with_configured_ai(
+                    prompt=prompt,
+                    fallback_text=fallback_feedback or "بازخورد داخلی در دسترس نیست.",
+                    ollama_model=get_selected_ollama_model(),
+                )
+                st.session_state["assessment_lab_feedback"] = enriched_feedback
+                st.session_state["assessment_lab_ai_source"] = ai_source
+                st.session_state["assessment_lab_ai_error"] = ai_error
+
+        if run_save:
+            result = st.session_state.get("assessment_lab_result", {})
             if not trainee_name.strip():
                 st.warning("نام کارآموز را وارد کنید.")
-                return
+            elif not result:
+                st.warning("ابتدا ارزیابی آفلاین را اجرا کنید.")
+            else:
+                stage_rows = result.get("stages", [])
+                saved_db, db_error = save_competency_result(
+                    trainee_name=trainee_name.strip(),
+                    total_score=float(result.get("total_score", 0.0)),
+                    max_score=float(result.get("max_score", 100.0)),
+                    percentage=float(result.get("percentage", 0.0)),
+                    pass_status=str(result.get("pass_status", "نیاز به تمرین بیشتر")),
+                    stage_scores_json=json.dumps(stage_rows, ensure_ascii=False),
+                    ai_feedback=str(st.session_state.get("assessment_lab_feedback", "")),
+                    ai_source=str(st.session_state.get("assessment_lab_ai_source", "template")),
+                )
+                if not saved_db:
+                    st.error(f"خطا در ذخیره SQLite: {db_error}")
+                else:
+                    st.success("نتیجه ارزشیابی در SQLite ذخیره شد.")
+                    st.session_state["assessment_lab_save_status"] = (
+                        f"ذخیره شد ({datetime.now().strftime('%H:%M:%S')})"
+                    )
+                    _save_assessment_workspace(
+                        {
+                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "trainee_name": trainee_name.strip(),
+                            "standard_code": "3512100023",
+                            "text": {
+                                "scenario": text_scenario,
+                                "prompt": text_prompt,
+                                "evidence": text_evidence,
+                            },
+                            "image": {
+                                "scenario": image_scenario,
+                                "prompt": image_prompt,
+                                "evidence": image_evidence,
+                            },
+                            "video": {
+                                "scenario": video_scenario,
+                                "prompt": video_prompt,
+                                "evidence": video_evidence,
+                            },
+                            "result": result,
+                            "feedback": st.session_state.get("assessment_lab_feedback", ""),
+                        }
+                    )
 
-            result = evaluate_competency_assessment(
-                stage_ratings=stage_ratings,
-                pass_threshold=float(pass_threshold),
-            )
-            stage_rows = result["stages"]
-            fallback_feedback = build_template_feedback(result=result, evidence_text=evidence_text)
-            stage_summary_lines = [
-                f"- {item['title']}: {item['trainee_score']} از {item['max_score']} ({item['stage_percentage']}%)"
-                for item in stage_rows
+        result = st.session_state.get("assessment_lab_result", {})
+        analysis = st.session_state.get("assessment_lab_analysis", {})
+        if analysis:
+            detect_fields = [
+                ("role", "نقش"),
+                ("goal", "هدف"),
+                ("context", "زمینه"),
+                ("output_format", "قالب خروجی"),
+                ("constraints", "محدودیت‌ها"),
+                ("audience", "مخاطب"),
+                ("tone", "لحن"),
+                ("examples", "مثال‌ها"),
+                ("step_by_step_logic", "منطق مرحله‌به‌مرحله"),
+                ("negative_prompt", "نگتیو پرامپت"),
+                ("visual_style", "سبک بصری"),
+                ("camera", "دوربین"),
+                ("lighting", "نورپردازی"),
+                ("voice_tone", "لحن صدا"),
+                ("pace", "سرعت/ریتم"),
+                ("emotion", "احساس"),
+                ("ethical_awareness", "آگاهی اخلاقی"),
             ]
-            ai_prompt = (
-                "شما یک ارزیاب آموزشی شایستگی محور هستید.\n"
-                "بر اساس داده های زیر، یک تحلیل آموزشی فارسی تولید کن.\n"
-                "خروجی دقیقاً شامل این بخش ها باشد:\n"
-                "1) نقاط قوت\n"
-                "2) شکاف های مهارتی\n"
-                "3) برنامه تمرینی مرحله بعد\n"
-                "4) توصیه شخصی سازی شده برای مدرس\n\n"
-                f"نام کارآموز: {trainee_name.strip()}\n"
-                f"امتیاز نهایی: {result['total_score']} از {result['max_score']} ({result['percentage']}%)\n"
-                f"وضعیت: {result['pass_status']}\n"
-                "خلاصه مراحل:\n"
-                + "\n".join(stage_summary_lines)
-                + "\n\n"
-                + f"شواهد ارائه شده:\n{(evidence_text or '-').strip()}\n"
-                + "\nپاسخ باید آموزشی، کوتاه، عملی و قابل اجرا باشد."
+            signal_map = dict(analysis.get("signals", {}))
+            score_map = dict(analysis.get("field_scores", {}))
+            detect_rows = []
+            for key, label in detect_fields:
+                detect_rows.append(
+                    {
+                        "مولفه": label,
+                        "وضعیت": "شناسایی شد" if bool(signal_map.get(key, False)) else "جاافتاده",
+                        "امتیاز": int(score_map.get(key, 0)),
+                    }
+                )
+            st.markdown("### تشخیص عناصر پرامپت")
+            st.dataframe(pd.DataFrame(detect_rows), use_container_width=True, hide_index=True)
+
+        if result:
+            stage_rows = list(result.get("stages", []))
+            stage_map = {str(item.get("title", "")): float(item.get("trainee_score", 0.0)) for item in stage_rows}
+            max_map = {str(item.get("title", "")): float(item.get("max_score", 0.0)) for item in stage_rows}
+
+            text_titles = [
+                "شناسایی و تحلیل",
+                "ساختار و اجزای پرامپت",
+                "تکنیک های پیشرفته مهندسی پرامپت",
+                "ارزیابی و بهبود پرامپت",
+                "تولید محتوای متنی",
+                "معیار نگرشی",
+            ]
+            image_titles = ["تولید تصویر"]
+            video_titles = ["تولید ویدیو و انیمیشن", "تولید محتوای صوتی"]
+
+            text_score = sum(stage_map.get(title, 0.0) for title in text_titles)
+            text_max = sum(max_map.get(title, 0.0) for title in text_titles)
+            image_score = sum(stage_map.get(title, 0.0) for title in image_titles)
+            image_max = sum(max_map.get(title, 0.0) for title in image_titles)
+            video_score = sum(stage_map.get(title, 0.0) for title in video_titles)
+            video_max = sum(max_map.get(title, 0.0) for title in video_titles)
+
+            st.markdown("### نتیجه سه مرحله آزمون")
+            section_df = pd.DataFrame(
+                [
+                    {"بخش": "متنی", "امتیاز": round(text_score, 2), "از": round(text_max, 2)},
+                    {"بخش": "تصویر", "امتیاز": round(image_score, 2), "از": round(image_max, 2)},
+                    {"بخش": "ویدئو", "امتیاز": round(video_score, 2), "از": round(video_max, 2)},
+                ]
             )
-            ai_feedback, ai_error, ai_source = maybe_generate_with_configured_ai(
-                prompt=ai_prompt,
-                fallback_text=fallback_feedback,
-                ollama_model=get_selected_ollama_model(),
+            st.dataframe(section_df, use_container_width=True, hide_index=True)
+
+            total_score = float(result.get("total_score", 0.0))
+            status_text = "قبول" if total_score >= float(pass_threshold) else "نیاز به تمرین بیشتر"
+            ai_source = str(st.session_state.get("assessment_lab_ai_source", "template")).strip()
+            st.markdown(
+                f"""
+                <div class="assessment-final-card">
+                    <div class="assessment-final-title">نتیجه نهایی</div>
+                    <div class="assessment-final-body">
+                        امتیاز کل: <b>{total_score}</b> از <b>100</b><br/>
+                        وضعیت: <b>{_escape(status_text)}</b><br/>
+                        سطح مهارتی: <b>{_escape(classify_skill_level(float(result.get("percentage", 0.0))))}</b><br/>
+                        امتیاز API: <b>0</b> (فقط بازخورد متنی)<br/>
+                        منبع بازخورد: <b>{_escape(format_ai_source(ai_source))}</b>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-
-            saved, save_error = save_competency_result(
-                trainee_name=trainee_name.strip(),
-                total_score=float(result["total_score"]),
-                max_score=float(result["max_score"]),
-                percentage=float(result["percentage"]),
-                pass_status=str(result["pass_status"]),
-                stage_scores_json=json.dumps(stage_rows, ensure_ascii=False),
-                ai_feedback=ai_feedback,
-                ai_source=ai_source,
-            )
-            if not saved:
-                st.error(f"خطا در ذخیره نتیجه ارزیابی مهارتی: {save_error}")
-                return
-
-            st.session_state["last_competency_assessment"] = {
-                "trainee_name": trainee_name.strip(),
-                "result": result,
-                "feedback": ai_feedback,
-                "ai_source": ai_source,
-                "ai_error": ai_error,
-            }
-
-        last_result = st.session_state.get("last_competency_assessment")
-        if last_result:
-            result = last_result["result"]
-            trainee_name = str(last_result.get("trainee_name", "-")).strip()
-            feedback = str(last_result.get("feedback", "")).strip()
-            ai_source = str(last_result.get("ai_source", "template")).strip()
-            ai_error = str(last_result.get("ai_error", "")).strip()
-
-            render_surface_card(
-                f"نتیجه ارزیابی: {trainee_name}",
-                (
-                    f"امتیاز نهایی: <b>{result['total_score']}</b> از <b>{result['max_score']}</b> "
-                    f"(<b>{result['percentage']}%</b>) | وضعیت: <b>{_escape(result['pass_status'])}</b>"
-                ),
-            )
-
-            metric_col1, metric_col2, metric_col3 = st.columns(3)
-            metric_col1.metric("امتیاز کل", f"{result['total_score']} / {result['max_score']}")
-            metric_col2.metric("درصد شایستگی", f"{result['percentage']}%")
-            metric_col3.metric("وضعیت", str(result["pass_status"]))
-
-            stage_df = pd.DataFrame(result["stages"])[
-                ["title", "max_score", "trainee_score", "stage_percentage"]
-            ].rename(
-                columns={
-                    "title": "مرحله",
-                    "max_score": "حداکثر امتیاز",
-                    "trainee_score": "امتیاز کارآموز",
-                    "stage_percentage": "درصد مرحله",
-                }
-            )
-            st.markdown("### امتیازدهی مرحله ای")
-            st.dataframe(stage_df, use_container_width=True, hide_index=True)
-
-            if ai_error:
-                st.info(f"{ai_error} (Fallback: تحلیل داخلی)")
-            render_surface_card("منبع تحلیل", _escape(format_ai_source(ai_source)))
-            render_prompt_shell("بازخورد آموزشی و ارزیابی AI", feedback)
+            feedback_text = str(st.session_state.get("assessment_lab_feedback", "")).strip()
+            if feedback_text:
+                render_prompt_shell("بازخورد فارسی", feedback_text)
 
     with dashboard_tab:
         rows, error = fetch_competency_results()
@@ -2469,7 +2776,7 @@ def main() -> None:
         "خانه": render_home,
         "نقشه کتاب مرجع": render_book_map,
         "درس‌ها": render_lessons,
-        "ارزیابی مهارتی شایستگی محور": render_competency_assessment_engine,
+        "ارزشیابی عملی": render_competency_assessment_engine,
         "بهبوددهنده پرامپت": render_prompt_improver,
         "تولید متن با AI": lambda: render_ai_text_generator_workspace(force_api=True),
         "استدیو پرامپت متنی": render_text_prompt_studio,
