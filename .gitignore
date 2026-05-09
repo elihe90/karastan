@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local databases and sqlite journals
+*.db
+*.db-journal
+
+# Local probes/temp files
+_fa_test.txt
+utf_test.txt
+utf8_probe.txt
+write_test.txt
+persian_shell_test.txt
+persian_patch_test.txt
+tmp_encoding_test.db
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
