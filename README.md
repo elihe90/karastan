@@ -90,7 +90,7 @@ karastan/
 ├─ requirements.txt
 ├─ README.md
 ├─ karistan_results.db          # بعد از اجرا ساخته می‌شود
-├─ promt engineer _virast (100).pdf   # مرجع محتوایی کتاب‌محور
+├─ promt engineer .pdf   # مرجع محتوایی کتاب‌محور
 ├─ data/
 │  ├─ book_outline.json
 │  ├─ prompt_templates.json
